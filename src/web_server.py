@@ -217,7 +217,7 @@ async def save_settings(req: SettingsRequest):
 async def index():
     from fastapi.responses import HTMLResponse
     html_content = """
-    <!DOCTYPE html>
+ <!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
@@ -226,21 +226,34 @@ async def index():
         <style>
             :root { --bg: #1e1e1e; --panel-bg: #252526; --text: #d4d4d4; --accent: #0e639c; --border: #333; }
             * { box-sizing: border-box; }
+            
             body { 
                 font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
                 background-color: var(--bg); color: var(--text); 
-                margin: 0; padding: 10px; font-size: 14px; 
-                height: 100vh; display: flex; flex-direction: column;
+                margin: 0; padding: 0; font-size: 14px; 
+                height: 100vh; width: 100vw;
+                display: flex; justify-content: center; /* 水平居中 */
             }
+
+            /* --- 核心布局 Wrapper --- */
+            .layout-wrapper {
+                width: 100%;
+                max-width: 1000px; /* 电脑端最大宽度限制 */
+                height: 100%;
+                display: flex; 
+                flex-direction: column;
+                padding: 15px;
+                background-color: var(--bg); /* 确保背景色一致 */
+            }
+
             h2 { 
                 color: #569cd6; border-bottom: 1px solid var(--border); 
                 padding-bottom: 8px; margin: 0 0 10px 0; font-size: 1.2rem; 
             }
             
-            /* 通用组件 */
             input[type="text"] { 
                 background: #3c3c3c; border: 1px solid #555; color: white; 
-                padding: 8px; border-radius: 4px; outline: none; font-size: 16px; /* 防止iOS缩放 */
+                padding: 8px; border-radius: 4px; outline: none; font-size: 16px; 
             }
             input:focus { border-color: var(--accent); }
             
@@ -252,17 +265,14 @@ async def index():
             button:active { transform: translateY(1px); }
             button.secondary { background-color: #3a3d41; }
 
-            /* 设置面板 */
             .panel { 
                 background: var(--panel-bg); padding: 12px; 
                 border-radius: 6px; border: 1px solid var(--border); 
-                margin-bottom: 10px;
+                margin-bottom: 15px;
             }
             .panel-header { font-weight: bold; color: #ce9178; margin-bottom: 8px; }
             
-            .form-row { 
-                display: flex; gap: 10px; align-items: center; margin-bottom: 8px; 
-            }
+            .form-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
             .form-row label { min-width: 60px; color: #9cdcfe; }
             .form-row input[type="text"] { flex: 1; }
             
@@ -270,82 +280,73 @@ async def index():
                 display: flex; gap: 10px; align-items: center; margin-top: 5px; 
                 justify-content: flex-end;
             }
-
-            /* 命令行区域 */
+            
             .cmd-area { display: flex; gap: 8px; margin-bottom: 10px; }
             .cmd-area input { flex: 1; }
             
-            /* 日志区域 - 自适应剩余高度 */
             #log-container {
                 background-color: #101010; border: 1px solid var(--border); 
                 flex: 1; overflow-y: auto; padding: 10px; 
                 border-radius: 4px; font-family: 'Consolas', monospace; 
                 font-size: 13px; line-height: 1.4;
                 white-space: pre-wrap; word-break: break-all;
-                -webkit-overflow-scrolling: touch; /* iOS平滑滚动 */
+                -webkit-overflow-scrolling: touch;
             }
             .log-line { border-bottom: 1px solid #1a1a1a; padding: 2px 0; }
             
-            /* --- 移动端适配 CSS --- */
             @media (max-width: 768px) {
                 h2 { font-size: 1rem; }
-                
-                /* 设置面板：变成垂直布局 */
+                .layout-wrapper { padding: 10px; } /* 移动端边距稍小 */
                 .form-row { flex-direction: column; align-items: flex-start; gap: 4px; }
-                .form-row label { width: 100%; }
-                .form-row input[type="text"] { width: 100%; }
-                
-                .actions-row { flex-wrap: wrap; }
-                .actions-row button { flex: 1; padding: 12px; } /* 更大的按钮 */
-                
-                /* 命令行：按钮放下面 */
+                .form-row label, .form-row input[type="text"] { width: 100%; }
+                .actions-row button { flex: 1; padding: 12px; }
                 .cmd-area { flex-direction: column; }
                 .cmd-area button { width: 100%; padding: 12px; }
-                
-                /* 日志：稍微调小字体适应屏幕 */
                 #log-container { font-size: 12px; }
             }
         </style>
     </head>
     <body>
-        
-        <!-- Config Panel -->
-        <div class="panel">
-            <div class="panel-header">[instance] Config</div>
-            <div class="form-row">
-                <label>URL</label>
-                <input type="text" id="cfg-url" placeholder="e.g. 192.168.1.10:32767">
+        <!-- 添加 Wrapper 限制最大宽度 -->
+        <div class="layout-wrapper">
+            
+            <!-- Config Panel -->
+            <div class="panel">
+                <div class="panel-header">[instance] Config</div>
+                <div class="form-row">
+                    <label>URL</label>
+                    <input type="text" id="cfg-url" placeholder="e.g. 192.168.1.10:32767">
+                </div>
+                <div class="actions-row" style="margin-top:0">
+                    <label style="display:flex;align-items:center;gap:5px;color:#d4d4d4">
+                        <input type="checkbox" id="cfg-secure" style="width:20px;height:20px"> 
+                        Secure (TLS)
+                    </label>
+                    <div style="flex:1"></div>
+                    <button class="secondary" onclick="togglePanel()" id="toggle-btn" style="padding:6px 10px; font-size:12px;">Hide</button>
+                </div>
+                <div class="actions-row" id="save-actions" style="margin-top:10px">
+                    <button onclick="saveSettings()">Save & Reconnect</button>
+                </div>
             </div>
-            <div class="actions-row" style="margin-top:0">
-                <label style="display:flex;align-items:center;gap:5px;color:#d4d4d4">
-                    <input type="checkbox" id="cfg-secure" style="width:20px;height:20px"> 
-                    Secure (TLS)
-                </label>
-                <div style="flex:1"></div>
-                <button class="secondary" onclick="togglePanel()" id="toggle-btn" style="padding:6px 10px; font-size:12px;">Hide</button>
-            </div>
-            <div class="actions-row" id="save-actions" style="margin-top:10px">
-                <button onclick="saveSettings()">Save & Reconnect</button>
-            </div>
-        </div>
 
-        <!-- Command Area -->
-        <div class="cmd-area">
-            <input type="text" id="cmd" placeholder="dl https://music.apple.com/..." autocapitalize="off">
-            <button onclick="sendCmd()">RUN</button>
+            <!-- Command Area -->
+            <div class="cmd-area">
+                <input type="text" id="cmd" placeholder="dl https://music.apple.com/..." autocapitalize="off">
+                <button onclick="sendCmd()">RUN</button>
+            </div>
+            
+            <!-- Log Console -->
+            <div id="log-container"></div>
+            
         </div>
-        
-        <!-- Log Console -->
-        <div id="log-container"></div>
 
         <script>
-            // --- UI Logic ---
             const panel = document.querySelector('.panel');
             const saveActions = document.getElementById('save-actions');
             const urlInput = document.getElementById('cfg-url');
             
             function togglePanel() {
-                // 简单的手风琴效果
                 if (urlInput.style.display === 'none') {
                     urlInput.style.display = 'block';
                     saveActions.style.display = 'flex';
@@ -357,7 +358,6 @@ async def index():
                 }
             }
 
-            // --- Websocket ---
             const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
             const logContainer = document.getElementById('log-container');
             const wsUrl = `${protocol}://${window.location.host}/ws/log`;
@@ -375,19 +375,16 @@ async def index():
                 div.className = 'log-line';
                 div.textContent = msg;
                 logContainer.appendChild(div);
-                // 自动滚动 (Buffer zone 100px)
                 if (logContainer.scrollHeight - logContainer.scrollTop < logContainer.clientHeight + 100) {
                     logContainer.scrollTop = logContainer.scrollHeight;
                 }
             }
 
-            // --- API Calls ---
             async function sendCmd() {
                 const cmdInput = document.getElementById('cmd');
                 const cmd = cmdInput.value;
                 if (!cmd) return;
                 cmdInput.value = '';
-                // 关闭键盘
                 cmdInput.blur(); 
                 try {
                     await fetch('/api/run', {
@@ -422,15 +419,10 @@ async def index():
                 } catch (e) { appendLog(`>>> [ERROR] ${e}`); }
             }
 
-            // Init
             connect();
             loadSettings();
-            
-            // 手机浏览默认在 Log 上太难看，默认收起设置面板？
-            // 还是保留展开方便修改，如果不修改可以点击 Hide
-            if (window.innerWidth < 600) {
-                // togglePanel(); // 如果你想默认折叠，取消注释这行
-            }
+            // 如果你想默认折叠，取消注释这行
+            if (window.innerWidth < 600) { /* togglePanel(); */ }
         </script>
     </body>
     </html>
