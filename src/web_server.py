@@ -69,7 +69,7 @@ def setup_web_logging():
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S')
     ws_handler.setFormatter(formatter)
     
-    logger.addHandler(ws_handler)
+    logger.add(ws_handler)
     logger.info("Web Log Handler attached.")
 
 # --- 核心 Web 逻辑 ---
