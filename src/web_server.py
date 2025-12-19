@@ -221,71 +221,151 @@ async def index():
     <html lang="en">
     <head>
         <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
         <title>AMD Web Console</title>
         <style>
-            body { font-family: 'Consolas', 'Menlo', monospace; background-color: #1e1e1e; color: #d4d4d4; padding: 20px; font-size: 13px; margin: 0;}
-            h2 { color: #569cd6; border-bottom: 1px solid #333; padding-bottom: 5px; margin-top: 0; display: flex; justify-content: space-between;}
-            .panel { background: #252526; padding: 15px; border-radius: 5px; margin-bottom: 15px; border: 1px solid #333; }
+            :root { --bg: #1e1e1e; --panel-bg: #252526; --text: #d4d4d4; --accent: #0e639c; --border: #333; }
+            * { box-sizing: border-box; }
+            body { 
+                font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
+                background-color: var(--bg); color: var(--text); 
+                margin: 0; padding: 10px; font-size: 14px; 
+                height: 100vh; display: flex; flex-direction: column;
+            }
+            h2 { 
+                color: #569cd6; border-bottom: 1px solid var(--border); 
+                padding-bottom: 8px; margin: 0 0 10px 0; font-size: 1.2rem; 
+            }
             
-            /* Settings Panel */
-            .settings-row { display: flex; gap: 10px; align-items: center; margin-bottom: 5px; }
-            label { width: 60px; color: #9cdcfe; font-weight: bold; }
-            input[type="text"] { flex-grow: 1; padding: 6px; border: 1px solid #3c3c3c; background: #333; color: white; outline: none; }
-            button { padding: 6px 15px; background-color: #0e639c; color: white; border: none; cursor: pointer; border-radius: 3px;}
-            button:hover { background-color: #1177bb; }
+            /* 通用组件 */
+            input[type="text"] { 
+                background: #3c3c3c; border: 1px solid #555; color: white; 
+                padding: 8px; border-radius: 4px; outline: none; font-size: 16px; /* 防止iOS缩放 */
+            }
+            input:focus { border-color: var(--accent); }
+            
+            button { 
+                background-color: var(--accent); color: white; border: none; 
+                padding: 10px 15px; border-radius: 4px; font-size: 14px; 
+                cursor: pointer; font-weight: 500; transition: background 0.2s;
+            }
+            button:active { transform: translateY(1px); }
             button.secondary { background-color: #3a3d41; }
+
+            /* 设置面板 */
+            .panel { 
+                background: var(--panel-bg); padding: 12px; 
+                border-radius: 6px; border: 1px solid var(--border); 
+                margin-bottom: 10px;
+            }
+            .panel-header { font-weight: bold; color: #ce9178; margin-bottom: 8px; }
             
+            .form-row { 
+                display: flex; gap: 10px; align-items: center; margin-bottom: 8px; 
+            }
+            .form-row label { min-width: 60px; color: #9cdcfe; }
+            .form-row input[type="text"] { flex: 1; }
+            
+            .actions-row { 
+                display: flex; gap: 10px; align-items: center; margin-top: 5px; 
+                justify-content: flex-end;
+            }
+
+            /* 命令行区域 */
+            .cmd-area { display: flex; gap: 8px; margin-bottom: 10px; }
+            .cmd-area input { flex: 1; }
+            
+            /* 日志区域 - 自适应剩余高度 */
             #log-container {
-                background-color: #101010; border: 1px solid #333; 
-                height: calc(100vh - 250px); 
-                overflow-y: auto; padding: 10px; 
+                background-color: #101010; border: 1px solid var(--border); 
+                flex: 1; overflow-y: auto; padding: 10px; 
+                border-radius: 4px; font-family: 'Consolas', monospace; 
+                font-size: 13px; line-height: 1.4;
                 white-space: pre-wrap; word-break: break-all;
+                -webkit-overflow-scrolling: touch; /* iOS平滑滚动 */
             }
             .log-line { border-bottom: 1px solid #1a1a1a; padding: 2px 0; }
+            
+            /* --- 移动端适配 CSS --- */
+            @media (max-width: 768px) {
+                h2 { font-size: 1rem; }
+                
+                /* 设置面板：变成垂直布局 */
+                .form-row { flex-direction: column; align-items: flex-start; gap: 4px; }
+                .form-row label { width: 100%; }
+                .form-row input[type="text"] { width: 100%; }
+                
+                .actions-row { flex-wrap: wrap; }
+                .actions-row button { flex: 1; padding: 12px; } /* 更大的按钮 */
+                
+                /* 命令行：按钮放下面 */
+                .cmd-area { flex-direction: column; }
+                .cmd-area button { width: 100%; padding: 12px; }
+                
+                /* 日志：稍微调小字体适应屏幕 */
+                #log-container { font-size: 12px; }
+            }
         </style>
     </head>
     <body>
-        <div style="max-width: 1200px; margin: 0 auto;">
-            
-            <!-- Config Panel -->
-            <div class="panel">
-                <div style="margin-bottom:10px; font-weight:bold; color: #ce9178;">[instance] Settings</div>
-                <div class="settings-row">
-                    <label>URL:</label>
-                    <input type="text" id="cfg-url" placeholder="e.g. 192.168.1.10:32767">
-                </div>
-                <div class="settings-row">
-                    <label>Secure:</label>
-                    <input type="checkbox" id="cfg-secure"> 
-                    <span style="font-size: 0.9em; color: gray;">(Use TLS)</span>
-                    <div style="flex-grow:1"></div>
-                    <button onclick="saveSettings()">Save & Reconnect</button>
-                    <button class="secondary" onclick="document.getElementById('cmd').focus()">Cancel</button>
-                </div>
+        
+        <!-- Config Panel -->
+        <div class="panel">
+            <div class="panel-header">[instance] Config</div>
+            <div class="form-row">
+                <label>URL</label>
+                <input type="text" id="cfg-url" placeholder="e.g. 192.168.1.10:32767">
             </div>
-
-            <h2>Console</h2>
-
-            <!-- Command Panel -->
-            <div style="display: flex; gap: 10px; margin-bottom: 10px;">
-                <input type="text" id="cmd" placeholder="dl https://music.apple.com/..." style="padding: 10px;" autofocus onkeydown="if(event.key==='Enter') sendCmd()">
-                <button onclick="sendCmd()" style="padding: 0 25px;">RUN</button>
+            <div class="actions-row" style="margin-top:0">
+                <label style="display:flex;align-items:center;gap:5px;color:#d4d4d4">
+                    <input type="checkbox" id="cfg-secure" style="width:20px;height:20px"> 
+                    Secure (TLS)
+                </label>
+                <div style="flex:1"></div>
+                <button class="secondary" onclick="togglePanel()" id="toggle-btn" style="padding:6px 10px; font-size:12px;">Hide</button>
             </div>
-            
-            <div id="log-container"></div>
+            <div class="actions-row" id="save-actions" style="margin-top:10px">
+                <button onclick="saveSettings()">Save & Reconnect</button>
+            </div>
         </div>
 
+        <!-- Command Area -->
+        <div class="cmd-area">
+            <input type="text" id="cmd" placeholder="dl https://music.apple.com/..." autocapitalize="off">
+            <button onclick="sendCmd()">RUN</button>
+        </div>
+        
+        <!-- Log Console -->
+        <div id="log-container"></div>
+
         <script>
+            // --- UI Logic ---
+            const panel = document.querySelector('.panel');
+            const saveActions = document.getElementById('save-actions');
+            const urlInput = document.getElementById('cfg-url');
+            
+            function togglePanel() {
+                // 简单的手风琴效果
+                if (urlInput.style.display === 'none') {
+                    urlInput.style.display = 'block';
+                    saveActions.style.display = 'flex';
+                    document.getElementById('toggle-btn').textContent = 'Hide';
+                } else {
+                    urlInput.style.display = 'none';
+                    saveActions.style.display = 'none';
+                    document.getElementById('toggle-btn').textContent = 'Show';
+                }
+            }
+
+            // --- Websocket ---
             const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
             const logContainer = document.getElementById('log-container');
-            
-            // --- Logging ---
             const wsUrl = `${protocol}://${window.location.host}/ws/log`;
             let ws;
 
             function connect() {
                 ws = new WebSocket(wsUrl);
-                ws.onopen = () => appendLog(">>> [SYSTEM] Connected to server.");
+                ws.onopen = () => appendLog(">>> [SYSTEM] Connected.");
                 ws.onmessage = (e) => appendLog(e.data);
                 ws.onclose = () => setTimeout(connect, 3000);
             }
@@ -295,17 +375,20 @@ async def index():
                 div.className = 'log-line';
                 div.textContent = msg;
                 logContainer.appendChild(div);
-                if (logContainer.scrollHeight - logContainer.scrollTop < logContainer.clientHeight + 200) {
+                // 自动滚动 (Buffer zone 100px)
+                if (logContainer.scrollHeight - logContainer.scrollTop < logContainer.clientHeight + 100) {
                     logContainer.scrollTop = logContainer.scrollHeight;
                 }
             }
 
-            // --- Commands ---
+            // --- API Calls ---
             async function sendCmd() {
                 const cmdInput = document.getElementById('cmd');
                 const cmd = cmdInput.value;
                 if (!cmd) return;
-                cmdInput.value = ''; 
+                cmdInput.value = '';
+                // 关闭键盘
+                cmdInput.blur(); 
                 try {
                     await fetch('/api/run', {
                         method: 'POST', 
@@ -315,44 +398,39 @@ async def index():
                 } catch (e) { appendLog(">>> Network Error"); }
             }
 
-            // --- Settings ---
             async function loadSettings() {
                 try {
                     const res = await fetch('/api/settings');
                     const data = await res.json();
                     document.getElementById('cfg-url').value = data.url;
                     document.getElementById('cfg-secure').checked = data.secure;
-                } catch (e) {
-                    console.error("Failed to load settings", e);
-                }
+                } catch (e) { console.error(e); }
             }
 
             async function saveSettings() {
                 const url = document.getElementById('cfg-url').value;
                 const secure = document.getElementById('cfg-secure').checked;
-                
-                appendLog(`>>> Saving settings: URL=${url}, Secure=${secure}...`);
-                
+                appendLog(`>>> Saving...`);
                 try {
                     const res = await fetch('/api/settings', {
                         method: 'POST', 
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({url: url, secure: secure})
+                        body: JSON.stringify({url, secure})
                     });
                     const data = await res.json();
-                    if(data.status === 'success') {
-                        appendLog(`>>> [SUCCESS] ${data.msg}`);
-                    } else {
-                        appendLog(`>>> [ERROR] ${data.msg}`);
-                    }
-                } catch (e) {
-                    appendLog(`>>> [ERROR] Failed to save settings: ${e}`);
-                }
+                    appendLog(`>>> [${data.status.toUpperCase()}] ${data.msg}`);
+                } catch (e) { appendLog(`>>> [ERROR] ${e}`); }
             }
 
             // Init
             connect();
             loadSettings();
+            
+            // 手机浏览默认在 Log 上太难看，默认收起设置面板？
+            // 还是保留展开方便修改，如果不修改可以点击 Hide
+            if (window.innerWidth < 600) {
+                // togglePanel(); // 如果你想默认折叠，取消注释这行
+            }
         </script>
     </body>
     </html>
