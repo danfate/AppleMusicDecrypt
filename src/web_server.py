@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 import uvicorn
 from creart import it
-from src.logger import GlobalLogger
+from src.logger import GlobalLogger, RipLogger # 引入 RipLogger 以便 Patch
 
 # --- 日志广播组件 ---
 
@@ -32,56 +32,67 @@ class ConnectionManager:
             try:
                 await connection.send_text(clean_msg)
             except Exception:
-                pass # 忽略发送失败的连接
+                pass 
     
     @staticmethod
     def remove_ansi(text: str) -> str:
-        # 正则表达式去除 \033[...m 这种颜色代码
-        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-        return ansi_escape.sub('', text)
+        # 去除 \033[...m 颜色代码
+        text = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', text)
+        return text
 
 manager = ConnectionManager()
 
 class WebSocketSink:
-    """
-    Loguru 的 Sink 类。
-    Loguru 会调用 write 方法写入日志。
-    """
+    """Loguru Sink"""
     def write(self, message):
-        # message 在 loguru 中是一个包含所有元数据的对象，可以直接转为 str
         text = str(message)
-        
-        # 因为 write 可能是从同步环境调用的，我们需要调度到 loop 中发送
         if manager.active_connections:
             try:
-                # 尝试获取正在运行的 Loop
                 loop = asyncio.get_running_loop()
-                # 放入任务队列
                 loop.create_task(manager.broadcast(text))
             except RuntimeError:
-                # 如果没有运行的 loop (极少情况)，忽略
                 pass
 
-# 暴露给外部调用的挂载函数
+# 全局单例 Sink
+ws_sink = WebSocketSink()
+
 def setup_web_logging():
-    """将 WebSocket Sink 挂载到 loguru"""
-    # 获取 loguru 实例
-    # 注意：src.logger.GlobalLogger 把 loguru 实例存在 self.logger 中
-    log_instance = it(GlobalLogger).logger
+    """
+    1. 挂载到全局 GlobalLogger
+    2. 使用 Monkey Patch 挂载到动态创建的 RipLogger
+    """
     
-    # 实例化 Sink
-    ws_sink = WebSocketSink()
-    
-    # 添加 Sink 到 Loguru
-    # format 指定了发往 WebSocket 的日志格式
-    log_instance.add(
+    # --- 1. 挂载 Global Logger (系统级日志) ---
+    global_logger = it(GlobalLogger).logger
+    global_logger.add(
         ws_sink.write,
         format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
         level="INFO",
-        colorize=True # Loguru 输出带颜色的字符，Web端再正则去除，或者设为False直接出纯文本
+        colorize=True
     )
-    
-    log_instance.info("Web Log Sink attached successfully.")
+    global_logger.info("Web Log Sink attached to GlobalLogger.")
+
+    # --- 2. 挂载 RipLogger (任务级日志 - 如下载进度) ---
+    # 保存原始的 __init__ 方法
+    original_init = RipLogger.__init__
+
+    def patched_init(self, *args, **kwargs):
+        # 1. 先执行原有的初始化 (它会创建 self.logger)
+        original_init(self, *args, **kwargs)
+        
+        # 2. 【核心】在原有逻辑执行完后，强行给它的 logger 添加我们的 sink
+        # 注意：RipLogger 内部使用了 copy.deepcopy，所以必须针对每个实例添加
+        self.logger.add(
+            ws_sink.write,
+            # 使用稍简单的格式，因为 RipLogger 已经在 message 里包含了很多格式信息
+            format="{message}", 
+            level="INFO",
+            colorize=True 
+        )
+
+    # 应用补丁：将 RipLogger 的类初始化方法替换为我们的版本
+    RipLogger.__init__ = patched_init
+    global_logger.info("Web Log Sink attached to RipLogger (Patched).")
 
 # --- 核心 Web 逻辑 ---
 
@@ -105,8 +116,6 @@ async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # 保持连接，在这个示例中我们不需要从网页接收数据
-            # 只需要发送，所以这里的 receive 可以用来检测断开
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
@@ -121,7 +130,7 @@ async def run_command(req: CommandRequest):
     if not command_str:
         return {"status": "ignored", "msg": "Empty command"}
 
-    # 日志会自动通过 WebSocket 广播出去
+    # 这条日志现在应该能立即在网页看到
     it(GlobalLogger).logger.info(f"[WebAPI] Command received: {command_str}")
 
     try:
@@ -137,7 +146,6 @@ async def run_command(req: CommandRequest):
 @app.get("/")
 async def index():
     from fastapi.responses import HTMLResponse
-    # 这里不需要改动，JS 使用 window.location.host 会自动适配 Docker 映射的端口
     html_content = """
     <!DOCTYPE html>
     <html lang="en">
@@ -145,28 +153,21 @@ async def index():
         <meta charset="UTF-8">
         <title>AMD Web Console</title>
         <style>
-            body { font-family: 'Consolas', 'Menlo', monospace; background-color: #1e1e1e; color: #d4d4d4; padding: 20px; font-size: 14px; }
-            h2 { color: #569cd6; border-bottom: 1px solid #333; padding-bottom: 10px; }
-            .container { max-width: 1000px; margin: 0 auto; }
-            .input-group { display: flex; gap: 10px; margin-bottom: 20px; }
-            input { flex-grow: 1; padding: 12px; border-radius: 4px; border: 1px solid #3c3c3c; background: #252526; color: #d4d4d4; outline: none; font-family: inherit; }
-            input:focus { border-color: #007acc; }
-            button { padding: 10px 24px; background-color: #0e639c; color: white; border: none; border-radius: 4px; cursor: pointer; font-family: inherit; font-weight: bold; }
-            button:hover { background-color: #1177bb; }
+            body { font-family: 'Consolas', 'Menlo', monospace; background-color: #1e1e1e; color: #d4d4d4; padding: 20px; font-size: 13px; }
+            h2 { color: #569cd6; border-bottom: 1px solid #333; padding-bottom: 5px; }
+            .input-group { display: flex; gap: 10px; margin-bottom: 10px; }
+            input { flex-grow: 1; padding: 10px; border: 1px solid #3c3c3c; background: #252526; color: #d4d4d4; outline: none; }
+            button { padding: 10px 20px; background-color: #0e639c; color: white; border: none; cursor: pointer; }
             #log-container {
-                background-color: #101010; border: 1px solid #333; border-radius: 4px;
-                height: 600px; overflow-y: auto; padding: 15px; 
+                background-color: #101010; border: 1px solid #333; 
+                height: 70vh; overflow-y: auto; padding: 10px; 
                 white-space: pre-wrap; word-break: break-all;
             }
-            .log-line { margin-bottom: 4px; line-height: 1.4; }
-            /* 简单的日志颜色模拟 */
-            .log-line:contains("ERROR") { color: #f48771; }
-            .log-line:contains("WARNING") { color: #cca700; }
-            .log-line:contains("SUCCESS") { color: #89d185; }
+            .log-line { border-bottom: 1px solid #1a1a1a; padding: 2px 0; }
         </style>
     </head>
     <body>
-        <div class="container">
+        <div style="max-width: 1000px; margin: 0 auto;">
             <h2>Music Downloader Web Console</h2>
             <div class="input-group">
                 <input type="text" id="cmd" placeholder="dl https://music.apple.com/..." autofocus onkeydown="if(event.key==='Enter') sendCmd()">
@@ -177,31 +178,17 @@ async def index():
 
         <script>
             const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-            const logContainer = document.getElementById('log-container');
-            
-            // 自动使用当前浏览器地址栏的 Host (IP:Port)
             const wsUrl = `${protocol}://${window.location.host}/ws/log`;
-            console.log("Connecting to WS:", wsUrl);
-
+            const logContainer = document.getElementById('log-container');
             let ws;
-            
+
             function connect() {
                 ws = new WebSocket(wsUrl);
-                
-                ws.onopen = () => appendLog(">>> [SYSTEM] Connected to server.");
-                
-                ws.onmessage = function(event) {
-                    appendLog(event.data);
-                };
-
-                ws.onclose = function() {
-                    appendLog(">>> [SYSTEM] Connection lost. Reconnecting in 3s...");
+                ws.onopen = () => appendLog(">>> Connected to server.");
+                ws.onmessage = (e) => appendLog(e.data);
+                ws.onclose = () => {
+                    appendLog(">>> Connection lost. Reconnecting...");
                     setTimeout(connect, 3000);
-                };
-                
-                ws.onerror = function(err) {
-                    console.error("WS Error:", err);
-                    // 不要在 GUI 频繁显示错误，依靠 onclose 重连
                 };
             }
 
@@ -217,23 +204,17 @@ async def index():
                 const cmdInput = document.getElementById('cmd');
                 const cmd = cmdInput.value;
                 if (!cmd) return;
-
                 cmdInput.value = ''; 
                 try {
-                    const res = await fetch('/api/run', {
+                    await fetch('/api/run', {
                         method: 'POST', 
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({cmd: cmd})
                     });
-                    if (res.status !== 200) {
-                        appendLog(`>>> [API ERROR] ${res.statusText}`);
-                    }
                 } catch (e) {
-                    appendLog(">>> [NETWORK ERROR] Failed to send command.");
+                    appendLog(">>> Network Error");
                 }
             }
-
-            // 初始化连接
             connect();
         </script>
     </body>
@@ -242,7 +223,6 @@ async def index():
     return HTMLResponse(content=html_content)
 
 async def start_web_server(host="0.0.0.0", port=8080):
-    # host="0.0.0.0" 确保 Docker 能够映射端口
     config = uvicorn.Config(app, host=host, port=port, log_level="warning") 
     server = uvicorn.Server(config)
     await server.serve()
