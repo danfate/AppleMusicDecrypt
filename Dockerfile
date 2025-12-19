@@ -1,52 +1,57 @@
+FROM python:3-alpine AS builder
+
+WORKDIR /build
+
+# 1. 设置 Alpine 镜像源（可选，如果你在中国大陆，这能极大加速 apk 和 git）
+# RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apk/repositories
+
+# 2. 集中安装编译依赖 (合并 Layer)
+RUN apk add --no-cache git g++ make cmake zlib-dev coreutils
+
+# 3. 编译 GPAC (利用缓存：除非修改了这一段 Dockerfile，否则这层永远不会重跑)
+RUN set -eux; \
+    git clone --depth=1 https://github.com/gpac/gpac.git ./gpac; \
+    cd ./gpac; \
+    ./configure --static-bin; \
+    make -j$(nproc); \
+    make install
+
+# 4. 编译 Bento4 (利用缓存)
+RUN set -eux; \
+    git clone --depth=1 https://github.com/axiomatic-systems/Bento4.git ./Bento4; \
+    mkdir -p ./Bento4/cmakebuild; \
+    cd ./Bento4/cmakebuild; \
+    cmake -DCMAKE_BUILD_TYPE=Release ..; \
+    make -j$(nproc); \
+    make install
+
+# --- Final Stage ---
 FROM python:3-alpine
 
 WORKDIR /app
 
-COPY . /app
-
-# Install Poetry
+# 5. 安装运行时所需的系统库 (ffmpeg, curl) 和 pip 安装 Poetry
+# 使用 pip 安装 poetry 通常比 curl 脚本更快且更容易利用 pip 缓存
 RUN set -eux; \
-    apk add --no-cache curl; \
-    \
-    curl -sSL https://install.python-poetry.org | python3 -
+    apk add --no-cache ffmpeg libstdc++ libgcc; \
+    pip install --no-cache-dir poetry
 
-ENV PATH="/root/.local/bin:$PATH"
+# 6. 从 Builder 阶段复制编译好的二进制文件
+# GPAC 通常安装在 /usr/local/bin 和 /usr/local/lib
+COPY --from=builder /usr/local/bin/MP4Box /usr/local/bin/MP4Box
+COPY --from=builder /usr/local/lib/libgpac* /usr/local/lib/
+# Bento4 同样
+COPY --from=builder /usr/local/bin/mp4* /usr/local/bin/
 
-# Build GPAC and Bento4
-RUN set -eux; \
-    apk add --no-cache git g++ make cmake zlib-dev coreutils; \
-    \
-    # Build and install GPAC
-    \
-    git clone --depth=1 https://github.com/gpac/gpac.git ./build/gpac || exit 1; \
-    cd ./build/gpac; \
-    ./configure; \
-    make -j$(nproc); \
-    make install; \
-    MP4BOX_PATH=$(command -v MP4Box); \
-    if [ -n "$MP4BOX_PATH" ]; then ln -sf "$MP4BOX_PATH" "$(dirname "$MP4BOX_PATH")/mp4box"; fi; \
-    cd /app; \
-    \
-    # Build and install Bento4
-    \
-    git clone --depth=1 https://github.com/axiomatic-systems/Bento4.git ./build/Bento4 || exit 1; \
-    mkdir -p ./build/Bento4/cmakebuild; \
-    cd ./build/Bento4/cmakebuild; \
-    cmake -DCMAKE_BUILD_TYPE=Release ..; \
-    make -j$(nproc); \
-    make install; \
-    cd /app; \
-    \
-    # Clean up
-    \
-    rm -rf ./build; \
-    apk del git g++ make cmake zlib-dev coreutils;
+# 7. 【关键优化】先只复制依赖描述文件
+COPY pyproject.toml poetry.lock ./
 
-# Install Python dependencies
-RUN set -eux; \
-    apk add --no-cache ffmpeg; \
-    \
-    export PATH="/root/.local/bin:$PATH"; \
-    poetry install;
+# 8. 安装 Python 依赖 (如果 pyproject.toml 没变，这一步会直接使用缓存)
+RUN poetry config virtualenvs.create false && \
+    poetry install --no-root --no-interaction --no-ansi
 
-CMD ["poetry", "run", "python", "main.py"]
+# 9. 【关键优化】最后才复制源代码
+# 这样修改代码时，只会重新执行这一步，耗时 < 1s
+COPY . .
+
+CMD ["sh", "-c", "umask 000 && poetry run python main.py"]
