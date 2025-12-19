@@ -1,36 +1,107 @@
 # src/web_server.py
 import asyncio
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+import logging
+import re
+from typing import List
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 import uvicorn
 from creart import it
 from src.logger import GlobalLogger
 
-# 用于接收 Web 请求的数据结构
+# --- 日志广播组件 ---
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        # 移除 ANSI 颜色代码，让网页显示纯文本
+        clean_msg = self.remove_ansi(message)
+        # 并发发送给所有连接的网页
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(clean_msg)
+            except Exception:
+                pass # 忽略发送失败的连接
+    
+    @staticmethod
+    def remove_ansi(text: str) -> str:
+        # 正则表达式去除 \033[...m 这种颜色代码
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        return ansi_escape.sub('', text)
+
+manager = ConnectionManager()
+
+class WebSocketLogHandler(logging.Handler):
+    """自定义日志处理器：拦截日志并扔给 WebSocket"""
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            # logging.emit 是同步方法，但 websocket 发送是异步的
+            # 我们需要获取当前的 event loop 来调度发送任务
+            if manager.active_connections:
+                loop = asyncio.get_running_loop()
+                # 使用 create_task 避免阻塞业务逻辑
+                loop.create_task(manager.broadcast(msg))
+        except (RuntimeError, Exception):
+            # 如果 event loop 没运行或者其他错误，忽略
+            pass
+
+# 暴露给外部调用的挂载函数
+def setup_web_logging():
+    """将 WebSocket 处理器挂载到全局 Logger 上"""
+    logger = it(GlobalLogger).logger
+    ws_handler = WebSocketLogHandler()
+    ws_handler.setLevel(logging.INFO) # 也可以设为 DEBUG
+    
+    # 设置日志格式 (包含时间)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S')
+    ws_handler.setFormatter(formatter)
+    
+    logger.addHandler(ws_handler)
+    logger.info("Web Log Handler attached.")
+
+# --- 核心 Web 逻辑 ---
+
+_shell_instance = None
+
+def set_shell_instance(shell):
+    global _shell_instance
+    _shell_instance = shell
+
 class CommandRequest(BaseModel):
     cmd: str
 
-# 全局变量，用于持有 main.py 传进来的 shell 实例
-_shell_instance = None
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 可以在这里做一些清理工作
     yield
 
 app = FastAPI(lifespan=lifespan)
 
-def set_shell_instance(shell):
-    """在该模块中保存 CLI shell 的实例引用"""
-    global _shell_instance
-    _shell_instance = shell
+@app.websocket("/ws/log")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # 保持连接，在这个示例中我们不需要从网页接收数据
+            # 只需要发送，所以这里的 receive 可以用来检测断开
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
 
 @app.post("/api/run")
 async def run_command(req: CommandRequest):
-    """
-    接收命令并调用原有逻辑
-    """
     global _shell_instance
     if not _shell_instance:
         raise HTTPException(status_code=503, detail="Shell instance not initialized")
@@ -39,62 +110,101 @@ async def run_command(req: CommandRequest):
     if not command_str:
         return {"status": "ignored", "msg": "Empty command"}
 
-    it(GlobalLogger).logger.info(f"[WebAPI] Received command: {command_str}")
+    # 日志会自动通过 WebSocket 广播出去
+    it(GlobalLogger).logger.info(f"[WebAPI] Command received: {command_str}")
 
     try:
-        # 直接复用 src/cmd.py 中的 command_parser 方法
-        # 注意：这里需要 await，因为 command_parser 是 async 的
         await _shell_instance.command_parser(command_str)
-        return {"status": "success", "msg": "Command executed (check logs for details)"}
+        return {"status": "success", "msg": "Command started"}
     except ValueError as e:
-        # 下面我们会修改 argparse 让它抛出 ValueError 而不是退出
-        it(GlobalLogger).logger.error(f"[WebAPI] Argument Error: {e}")
+        it(GlobalLogger).logger.warning(f"[WebAPI] Arg Error: {e}")
         return {"status": "error", "msg": str(e)}
     except Exception as e:
-        it(GlobalLogger).logger.exception("[WebAPI] Execution error")
+        it(GlobalLogger).logger.error(f"[WebAPI] Exec Error: {e}")
         return {"status": "error", "msg": str(e)}
 
 @app.get("/")
 async def index():
-    """提供一个极其简易的 HTML 输入框"""
     from fastapi.responses import HTMLResponse
     html_content = """
     <!DOCTYPE html>
-    <html>
-        <head><title>Music Downloader Web Console</title></head>
-        <body style="font-family: sans-serif; padding: 2rem;">
-            <h2>Web Console</h2>
-            <div style="display: flex; gap: 10px;">
-                <input type="text" id="cmd" placeholder="e.g.: dl https://music.apple.com/..." style="width: 400px; padding: 8px;">
-                <button onclick="sendCmd()" style="padding: 8px 16px;">Run</button>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>AMD Web Console</title>
+        <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1e1e1e; color: #c0c0c0; padding: 20px; }
+            h2 { color: #fff; }
+            .container { max-width: 900px; margin: 0 auto; }
+            .input-group { display: flex; gap: 10px; margin-bottom: 20px; }
+            input { flex-grow: 1; padding: 10px; border-radius: 4px; border: 1px solid #444; background: #2d2d2d; color: white; outline: none; }
+            button { padding: 10px 20px; background-color: #007acc; color: white; border: none; border-radius: 4px; cursor: pointer; }
+            button:hover { background-color: #005f9e; }
+            #log-container {
+                background-color: #0d0d0d; border: 1px solid #333; border-radius: 4px;
+                height: 500px; overflow-y: auto; padding: 10px; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em;
+            }
+            .log-line { margin: 2px 0; border-bottom: 1px solid #1a1a1a; word-wrap: break-word; white-space: pre-wrap;}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h2>Music Downloader Web Console</h2>
+            <div class="input-group">
+                <input type="text" id="cmd" placeholder="Enter command (e.g., dl https://music.apple.com/...)" onkeydown="if(event.key==='Enter') sendCmd()">
+                <button onclick="sendCmd()">Execute</button>
             </div>
-            <p id="status" style="margin-top: 10px; color: gray;"></p>
-            <script>
-                async function sendCmd() {
-                    const cmdInput = document.getElementById('cmd');
-                    const status = document.getElementById('status');
-                    status.innerText = "Sending...";
-                    try {
-                        const res = await fetch('/api/run', {
-                            method: 'POST', 
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({cmd: cmdInput.value})
-                        });
-                        const data = await res.json();
-                        status.innerText = `[${data.status}] ${data.msg}`;
-                        if(data.status === 'success') cmdInput.value = '';
-                    } catch (e) {
-                        status.innerText = "Connection Error";
-                    }
+            <div id="log-container"></div>
+        </div>
+
+        <script>
+            // 1. WebSocket 连接逻辑
+            const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+            const wsUrl = `${protocol}://${window.location.host}/ws/log`;
+            const ws = new WebSocket(wsUrl);
+            const logContainer = document.getElementById('log-container');
+
+            function appendLog(msg) {
+                const div = document.createElement('div');
+                div.className = 'log-line';
+                div.textContent = msg; // TextContent 防止 XSS
+                logContainer.appendChild(div);
+                // 自动滚动到底部
+                logContainer.scrollTop = logContainer.scrollHeight;
+            }
+
+            ws.onmessage = function(event) {
+                appendLog(event.data);
+            };
+            ws.onopen = () => appendLog(">>> Connected to Real-time Stream.");
+            ws.onclose = () => appendLog(">>> Connection Lost.");
+
+            // 2. 命令发送逻辑
+            async function sendCmd() {
+                const cmdInput = document.getElementById('cmd');
+                const cmd = cmdInput.value;
+                if (!cmd) return;
+
+                cmdInput.value = ''; // 立即清空，提升体验
+                // 不需要在前端 appendLog，因为后端收到请求后会打印日志，WS 会自动推回来
+                
+                try {
+                    await fetch('/api/run', {
+                        method: 'POST', 
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({cmd: cmd})
+                    });
+                } catch (e) {
+                    appendLog(">>> Error sending command.");
                 }
-            </script>
-        </body>
+            }
+        </script>
+    </body>
     </html>
     """
     return HTMLResponse(content=html_content)
 
 async def start_web_server(host="0.0.0.0", port=8080):
-    """启动 uvicorn server"""
-    config = uvicorn.Config(app, host=host, port=port, log_level="error")
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning") # 减少 uvicorn 自身日志
     server = uvicorn.Server(config)
     await server.serve()

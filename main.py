@@ -18,7 +18,7 @@ add_creator(MeasurerCreator)
 from src.cmd import InteractiveShell
 
 # 引入我们新建的模块
-from src.web_server import set_shell_instance, start_web_server
+from src.web_server import set_shell_instance, start_web_server,setup_web_logging
 
 # 定义一个不需要改动 API 签名的方法来劫持 argparse 的 error
 def patch_parser_error(parser_instance):
@@ -41,6 +41,10 @@ if __name__ == '__main__':
     
     # 2. 将实例注入给 Web Server
     set_shell_instance(cmd)
+
+    # 4. 【新增】挂载 Web 日志处理器
+    # 这必须在 logger 创建后执行 (InteractiveShell 初始化时肯定已经创建了 logger)
+    setup_web_logging()
 
     # 3. 定义并行任务
     async def main_entry():
