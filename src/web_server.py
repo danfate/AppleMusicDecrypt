@@ -1,6 +1,5 @@
 # src/web_server.py
 import asyncio
-import logging
 import re
 from typing import List
 
@@ -43,34 +42,46 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-class WebSocketLogHandler(logging.Handler):
-    """自定义日志处理器：拦截日志并扔给 WebSocket"""
-    def emit(self, record):
-        try:
-            msg = self.format(record)
-            # logging.emit 是同步方法，但 websocket 发送是异步的
-            # 我们需要获取当前的 event loop 来调度发送任务
-            if manager.active_connections:
+class WebSocketSink:
+    """
+    Loguru 的 Sink 类。
+    Loguru 会调用 write 方法写入日志。
+    """
+    def write(self, message):
+        # message 在 loguru 中是一个包含所有元数据的对象，可以直接转为 str
+        text = str(message)
+        
+        # 因为 write 可能是从同步环境调用的，我们需要调度到 loop 中发送
+        if manager.active_connections:
+            try:
+                # 尝试获取正在运行的 Loop
                 loop = asyncio.get_running_loop()
-                # 使用 create_task 避免阻塞业务逻辑
-                loop.create_task(manager.broadcast(msg))
-        except (RuntimeError, Exception):
-            # 如果 event loop 没运行或者其他错误，忽略
-            pass
+                # 放入任务队列
+                loop.create_task(manager.broadcast(text))
+            except RuntimeError:
+                # 如果没有运行的 loop (极少情况)，忽略
+                pass
 
 # 暴露给外部调用的挂载函数
 def setup_web_logging():
-    """将 WebSocket 处理器挂载到全局 Logger 上"""
-    logger = it(GlobalLogger).logger
-    ws_handler = WebSocketLogHandler()
-    ws_handler.setLevel(logging.INFO) # 也可以设为 DEBUG
+    """将 WebSocket Sink 挂载到 loguru"""
+    # 获取 loguru 实例
+    # 注意：src.logger.GlobalLogger 把 loguru 实例存在 self.logger 中
+    log_instance = it(GlobalLogger).logger
     
-    # 设置日志格式 (包含时间)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S')
-    ws_handler.setFormatter(formatter)
+    # 实例化 Sink
+    ws_sink = WebSocketSink()
     
-    logger.add(ws_handler)
-    logger.info("Web Log Handler attached.")
+    # 添加 Sink 到 Loguru
+    # format 指定了发往 WebSocket 的日志格式
+    log_instance.add(
+        ws_sink.write,
+        format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
+        level="INFO",
+        colorize=True # Loguru 输出带颜色的字符，Web端再正则去除，或者设为False直接出纯文本
+    )
+    
+    log_instance.info("Web Log Sink attached successfully.")
 
 # --- 核心 Web 逻辑 ---
 
@@ -126,6 +137,7 @@ async def run_command(req: CommandRequest):
 @app.get("/")
 async def index():
     from fastapi.responses import HTMLResponse
+    # 这里不需要改动，JS 使用 window.location.host 会自动适配 Docker 映射的端口
     html_content = """
     <!DOCTYPE html>
     <html lang="en">
@@ -133,71 +145,96 @@ async def index():
         <meta charset="UTF-8">
         <title>AMD Web Console</title>
         <style>
-            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1e1e1e; color: #c0c0c0; padding: 20px; }
-            h2 { color: #fff; }
-            .container { max-width: 900px; margin: 0 auto; }
+            body { font-family: 'Consolas', 'Menlo', monospace; background-color: #1e1e1e; color: #d4d4d4; padding: 20px; font-size: 14px; }
+            h2 { color: #569cd6; border-bottom: 1px solid #333; padding-bottom: 10px; }
+            .container { max-width: 1000px; margin: 0 auto; }
             .input-group { display: flex; gap: 10px; margin-bottom: 20px; }
-            input { flex-grow: 1; padding: 10px; border-radius: 4px; border: 1px solid #444; background: #2d2d2d; color: white; outline: none; }
-            button { padding: 10px 20px; background-color: #007acc; color: white; border: none; border-radius: 4px; cursor: pointer; }
-            button:hover { background-color: #005f9e; }
+            input { flex-grow: 1; padding: 12px; border-radius: 4px; border: 1px solid #3c3c3c; background: #252526; color: #d4d4d4; outline: none; font-family: inherit; }
+            input:focus { border-color: #007acc; }
+            button { padding: 10px 24px; background-color: #0e639c; color: white; border: none; border-radius: 4px; cursor: pointer; font-family: inherit; font-weight: bold; }
+            button:hover { background-color: #1177bb; }
             #log-container {
-                background-color: #0d0d0d; border: 1px solid #333; border-radius: 4px;
-                height: 500px; overflow-y: auto; padding: 10px; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em;
+                background-color: #101010; border: 1px solid #333; border-radius: 4px;
+                height: 600px; overflow-y: auto; padding: 15px; 
+                white-space: pre-wrap; word-break: break-all;
             }
-            .log-line { margin: 2px 0; border-bottom: 1px solid #1a1a1a; word-wrap: break-word; white-space: pre-wrap;}
+            .log-line { margin-bottom: 4px; line-height: 1.4; }
+            /* 简单的日志颜色模拟 */
+            .log-line:contains("ERROR") { color: #f48771; }
+            .log-line:contains("WARNING") { color: #cca700; }
+            .log-line:contains("SUCCESS") { color: #89d185; }
         </style>
     </head>
     <body>
         <div class="container">
             <h2>Music Downloader Web Console</h2>
             <div class="input-group">
-                <input type="text" id="cmd" placeholder="Enter command (e.g., dl https://music.apple.com/...)" onkeydown="if(event.key==='Enter') sendCmd()">
-                <button onclick="sendCmd()">Execute</button>
+                <input type="text" id="cmd" placeholder="dl https://music.apple.com/..." autofocus onkeydown="if(event.key==='Enter') sendCmd()">
+                <button onclick="sendCmd()">RUN</button>
             </div>
             <div id="log-container"></div>
         </div>
 
         <script>
-            // 1. WebSocket 连接逻辑
             const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-            const wsUrl = `${protocol}://${window.location.host}/ws/log`;
-            const ws = new WebSocket(wsUrl);
             const logContainer = document.getElementById('log-container');
+            
+            // 自动使用当前浏览器地址栏的 Host (IP:Port)
+            const wsUrl = `${protocol}://${window.location.host}/ws/log`;
+            console.log("Connecting to WS:", wsUrl);
+
+            let ws;
+            
+            function connect() {
+                ws = new WebSocket(wsUrl);
+                
+                ws.onopen = () => appendLog(">>> [SYSTEM] Connected to server.");
+                
+                ws.onmessage = function(event) {
+                    appendLog(event.data);
+                };
+
+                ws.onclose = function() {
+                    appendLog(">>> [SYSTEM] Connection lost. Reconnecting in 3s...");
+                    setTimeout(connect, 3000);
+                };
+                
+                ws.onerror = function(err) {
+                    console.error("WS Error:", err);
+                    // 不要在 GUI 频繁显示错误，依靠 onclose 重连
+                };
+            }
 
             function appendLog(msg) {
                 const div = document.createElement('div');
                 div.className = 'log-line';
-                div.textContent = msg; // TextContent 防止 XSS
+                div.textContent = msg;
                 logContainer.appendChild(div);
-                // 自动滚动到底部
                 logContainer.scrollTop = logContainer.scrollHeight;
             }
 
-            ws.onmessage = function(event) {
-                appendLog(event.data);
-            };
-            ws.onopen = () => appendLog(">>> Connected to Real-time Stream.");
-            ws.onclose = () => appendLog(">>> Connection Lost.");
-
-            // 2. 命令发送逻辑
             async function sendCmd() {
                 const cmdInput = document.getElementById('cmd');
                 const cmd = cmdInput.value;
                 if (!cmd) return;
 
-                cmdInput.value = ''; // 立即清空，提升体验
-                // 不需要在前端 appendLog，因为后端收到请求后会打印日志，WS 会自动推回来
-                
+                cmdInput.value = ''; 
                 try {
-                    await fetch('/api/run', {
+                    const res = await fetch('/api/run', {
                         method: 'POST', 
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({cmd: cmd})
                     });
+                    if (res.status !== 200) {
+                        appendLog(`>>> [API ERROR] ${res.statusText}`);
+                    }
                 } catch (e) {
-                    appendLog(">>> Error sending command.");
+                    appendLog(">>> [NETWORK ERROR] Failed to send command.");
                 }
             }
+
+            // 初始化连接
+            connect();
         </script>
     </body>
     </html>
@@ -205,6 +242,7 @@ async def index():
     return HTMLResponse(content=html_content)
 
 async def start_web_server(host="0.0.0.0", port=8080):
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning") # 减少 uvicorn 自身日志
+    # host="0.0.0.0" 确保 Docker 能够映射端口
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning") 
     server = uvicorn.Server(config)
     await server.serve()
