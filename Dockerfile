@@ -6,13 +6,13 @@ WORKDIR /build
 # RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apk/repositories
 
 # 2. 集中安装编译依赖 (合并 Layer)
-RUN apk add --no-cache git g++ make cmake zlib-dev coreutils
+RUN apk add --no-cache git g++ make cmake zlib-dev zlib-static coreutils pkgconf
 
-# 3. 编译 GPAC (利用缓存：除非修改了这一段 Dockerfile，否则这层永远不会重跑)
+# 3. 编译 GPAC
 RUN set -eux; \
     git clone --depth=1 https://github.com/gpac/gpac.git ./gpac; \
     cd ./gpac; \
-    ./configure --static-bin; \
+    ./configure --static-bin --prefix=/usr/local; \
     make -j$(nproc); \
     make install
 
@@ -30,6 +30,7 @@ FROM python:3-alpine
 
 WORKDIR /app
 
+
 # 5. 安装运行时所需的系统库 (ffmpeg, curl) 和 pip 安装 Poetry
 # 使用 pip 安装 poetry 通常比 curl 脚本更快且更容易利用 pip 缓存
 RUN set -eux; \
@@ -38,13 +39,14 @@ RUN set -eux; \
 
 # 6. 从 Builder 阶段复制编译好的二进制文件
 # GPAC 通常安装在 /usr/local/bin 和 /usr/local/lib
-COPY --from=builder /usr/local/bin/MP4Box /usr/local/bin/MP4Box
-COPY --from=builder /usr/local/lib/libgpac* /usr/local/lib/
-# Bento4 同样
-COPY --from=builder /usr/local/bin/mp4* /usr/local/bin/
+COPY --from=builder /usr/local/bin/* /usr/local/bin/
+COPY --from=builder /usr/local/lib/* /usr/local/lib/
+
+
+RUN ln -sf /usr/local/bin/MP4Box /usr/local/bin/mp4box &&  MP4Box -version
 
 # 7. 【关键优化】先只复制依赖描述文件
-COPY pyproject.toml poetry.lock ./
+COPY pyproject.toml ./
 
 # 8. 安装 Python 依赖 (如果 pyproject.toml 没变，这一步会直接使用缓存)
 RUN poetry config virtualenvs.create false && \
